@@ -28,10 +28,10 @@ import { Type, type TSchema, type TObject } from "typebox";
 
 // ── Configuration ──────────────────────────────────────────────────────
 
-const DEFAULT_MCP_URL = "http://localhost:31126/mcp";
+const DEFAULT_MCP_URL = process.env.SKETCH_MCP_URL || "http://localhost:31126/mcp";
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 const CLIENT_NAME = "pi-sketch-mcp-bridge";
-const CLIENT_VERSION = "1.0.0";
+const CLIENT_VERSION = "1.1.0";
 
 // ── State ──────────────────────────────────────────────────────────────
 
@@ -54,7 +54,15 @@ interface MCPResponse {
   error?: MCPError;
 }
 
-async function mcpCall(method: string, params?: Record<string, unknown>): Promise<MCPResponse> {
+/**
+ * Make a JSON-RPC call to the Sketch MCP server.
+ * Handles network errors (connection refused, timeout, DNS) gracefully.
+ */
+async function mcpCall(
+  method: string,
+  params?: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<MCPResponse> {
   const id = ++requestId;
   const body = JSON.stringify({
     jsonrpc: "2.0",
@@ -63,35 +71,92 @@ async function mcpCall(method: string, params?: Record<string, unknown>): Promis
     params: params || {},
   });
 
-  const res = await fetch(DEFAULT_MCP_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body,
-    // MCP server is local, short timeouts are appropriate
-    signal: AbortSignal.timeout(30000),
-  });
+  let res: Response;
+  try {
+    res = await fetch(DEFAULT_MCP_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body,
+      signal: signal ?? AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Classify common connection errors for better diagnostics
+    if (message.includes("ECONNREFUSED") || message.includes("Connection refused")) {
+      throw new Error(
+        `Sketch MCP server not reachable at ${DEFAULT_MCP_URL}. ` +
+          `Make sure Sketch is running and MCP Server is started (⌘K → "Start MCP Server").`,
+      );
+    }
+    if (message.includes("ENOTFOUND") || message.includes("resolve")) {
+      throw new Error(
+        `Cannot resolve MCP server host. Check SKETCH_MCP_URL environment variable.`,
+      );
+    }
+    if (message.includes("aborted") || message.includes("timeout") || message.includes("Timeout")) {
+      throw new Error(
+        `Sketch MCP request timed out (${method}). The server may be unresponsive.`,
+      );
+    }
+    throw new Error(`Sketch MCP request failed: ${message}`);
+  }
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`MCP HTTP ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(
+      `Sketch MCP HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
+    );
   }
 
-  return (await res.json()) as MCPResponse;
+  const json = (await res.json()) as MCPResponse;
+
+  // Surface JSON-RPC errors as thrown exceptions
+  if (json.error) {
+    throw new Error(
+      `Sketch MCP error [${method}]: ${json.error.message} (code ${json.error.code})${
+        json.error.data ? `\nData: ${JSON.stringify(json.error.data)}` : ""
+      }`,
+    );
+  }
+
+  return json;
 }
 
 // ── JSON Schema → TypeBox Converter ────────────────────────────────────
 
 /**
  * Recursively converts a JSON Schema (MCP inputSchema) to a TypeBox TSchema.
- * Handles: string, number, integer, boolean, object, array.
+ * Handles: string, number, integer, boolean, object, array, enum, const.
  * Unknown/unsupported types fall back to Type.String().
  */
 function jsonSchemaToTypeBox(schema: Record<string, unknown> | undefined): TSchema {
   if (!schema || typeof schema !== "object") {
     return Type.Object({});
+  }
+
+  const description = schema.description as string | undefined;
+  const opts = description ? { description } : {};
+
+  // Handle enum (single-value or multi-value)
+  if (schema.enum !== undefined) {
+    const values = schema.enum as unknown[];
+    if (values.length === 1) {
+      // Single enum → constant
+      return Type.Literal(values[0]);
+    }
+    // Multi-value enum → union of literals
+    const literals = values.map((v) => Type.Literal(v));
+    if (literals.length > 0) {
+      return Type.Union(literals as any, opts);
+    }
+  }
+
+  // Handle const
+  if (schema.const !== undefined) {
+    return Type.Literal(schema.const);
   }
 
   const schemaType = schema.type as string | undefined;
@@ -113,25 +178,20 @@ function jsonSchemaToTypeBox(schema: Record<string, unknown> | undefined): TSche
       props[key] = field;
     }
 
-    const description = schema.description as string | undefined;
     if (Object.keys(props).length === 0) {
-      return Type.Object({}, description ? { description } : {});
+      return Type.Object({}, opts);
     }
-    return Type.Object(props, description ? { description } : {});
+    return Type.Object(props, opts);
   }
 
   // Handle array type
   if (schemaType === "array") {
     const items = schema.items as Record<string, unknown> | undefined;
     const itemSchema = items ? jsonSchemaToTypeBox(items) : Type.String();
-    const description = schema.description as string | undefined;
-    return Type.Array(itemSchema, description ? { description } : {});
+    return Type.Array(itemSchema, opts);
   }
 
   // Handle primitive types
-  const description = schema.description as string | undefined;
-  const opts = description ? { description } : {};
-
   switch (schemaType) {
     case "string":
       return Type.String(opts);
@@ -142,7 +202,9 @@ function jsonSchemaToTypeBox(schema: Record<string, unknown> | undefined): TSche
       return Type.Boolean(opts);
     default:
       // Fallback: treat as string (most flexible for LLM)
-      return Type.String({ description: description || `Value (type: ${schemaType || "unknown"})` });
+      return Type.String({
+        description: description || `Value (type: ${schemaType || "unknown"})`,
+      });
   }
 }
 
@@ -171,50 +233,73 @@ interface MCPResourceContent {
 
 type MCPContentItem = MCPTextContent | MCPImageContent | MCPResourceContent;
 
+/**
+ * Extract and normalize content from an MCP tools/call result.
+ *
+ * Text content is accumulated into a single readable string.
+ * Image content (e.g. screenshots) is passed through as proper ImageContent
+ * blocks so the LLM can actually see them.
+ * Resource content is summarized since Pi doesn't have a resource concept.
+ */
 function extractContent(result: Record<string, unknown> | undefined): {
   text: string;
+  images: Array<{ type: "image"; data: string; mimeType: string }>;
   details: Record<string, unknown>;
 } {
   const content = result?.content as MCPContentItem[] | undefined;
 
   if (!content || !Array.isArray(content)) {
-    // No content array – return the raw result as JSON
     return {
       text: result ? JSON.stringify(result, null, 2) : "(no result)",
+      images: [],
       details: { raw_result: result || null },
     };
   }
 
   const textParts: string[] = [];
-  const imageCount = content.filter((c) => c.type === "image").length;
-  const resourceCount = content.filter((c) => c.type === "resource").length;
+  const images: Array<{ type: "image"; data: string; mimeType: string }> = [];
+  let resourceCount = 0;
 
   for (const item of content) {
     if (item.type === "text") {
       textParts.push(item.text);
+    } else if (item.type === "image") {
+      // Pass through images (e.g. screenshots) so the LLM can see them
+      images.push({
+        type: "image",
+        data: item.data,
+        mimeType: item.mimeType,
+      });
+    } else if (item.type === "resource") {
+      resourceCount++;
+      // If the resource has inline text, include it
+      if (item.resource?.text) {
+        textParts.push(item.resource.text);
+      }
     }
   }
 
   let text = textParts.join("\n");
 
-  // Append summary of non-text content
+  // Append summary of non-text content only if there's no inline rendering
   const extras: string[] = [];
-  if (imageCount > 0) extras.push(`${imageCount} image(s)`);
+  if (images.length > 0) extras.push(`${images.length} image(s) attached`);
   if (resourceCount > 0) extras.push(`${resourceCount} resource(s)`);
 
   if (extras.length > 0) {
-    text = text ? `${text}\n\n[Contains: ${extras.join(", ")}]` : `[Contains: ${extras.join(", ")}]`;
+    text = text ? `${text}\n\n[${extras.join(", ")}]` : `[${extras.join(", ")}]`;
   }
 
-  if (!text) {
+  if (!text && images.length === 0) {
     text = JSON.stringify(result, null, 2);
   }
 
   return {
     text,
+    images,
     details: {
       content_items: content.length,
-      image_count: imageCount,
+      image_count: images.length,
       resource_count: resourceCount,
       raw_result: result,
     },
@@ -230,7 +315,7 @@ interface MCPToolDef {
 }
 
 async function discoverAndRegisterTools(pi: ExtensionAPI): Promise<number> {
-  // Initialize MCP session
+  // Step 1: Initialize MCP session
   const initResult = await mcpCall("initialize", {
     protocolVersion: MCP_PROTOCOL_VERSION,
     capabilities: {
@@ -242,20 +327,19 @@ async function discoverAndRegisterTools(pi: ExtensionAPI): Promise<number> {
     },
   });
 
-  if (initResult.error) {
-    throw new Error(
-      `MCP initialize failed: ${initResult.error.message} (code ${initResult.error.code})`,
-    );
-  }
+  console.log(
+    `Sketch MCP: initialized session with server ${initResult.result?.serverInfo ? JSON.stringify(initResult.result.serverInfo) : "(unknown)"}`,
+  );
 
-  // Discover available tools
+  // Step 2: Send the required "initialized" notification (MCP protocol §4.1)
+  // This is a notification, not a request — we don't await the response.
+  // Fire-and-forget; if it fails, tools may still work.
+  mcpCall("notifications/initialized", {}).catch((err) => {
+    console.warn(`Sketch MCP: initialized notification failed: ${err instanceof Error ? err.message : err}`);
+  });
+
+  // Step 3: Discover available tools
   const toolsResult = await mcpCall("tools/list");
-  if (toolsResult.error) {
-    throw new Error(
-      `MCP tools/list failed: ${toolsResult.error.message} (code ${toolsResult.error.code})`,
-    );
-  }
-
   const tools: MCPToolDef[] = (toolsResult.result?.tools as MCPToolDef[]) || [];
   let registered = 0;
 
@@ -272,40 +356,44 @@ async function discoverAndRegisterTools(pi: ExtensionAPI): Promise<number> {
       // Convert JSON Schema to TypeBox parameters
       const params = jsonSchemaToTypeBox(tool.inputSchema);
 
+      // Build a one-line snippet for the system prompt's "Available tools" section
+      const promptSnippet = tool.description
+        ? `sketch_${tool.name} – ${tool.description.split(".")[0].trim()}`
+        : `sketch_${tool.name} – Sketch design tool`;
+
       pi.registerTool({
         name: toolName,
         label: `Sketch: ${tool.name}`,
         description:
           tool.description ||
           `Sketch MCP tool: ${tool.name}. Operates on the currently open Sketch document.`,
+        promptSnippet,
         parameters: params as TObject,
-        async execute(_toolCallId, toolParams, _signal, _onUpdate, _ctx) {
+        async execute(_toolCallId, toolParams, signal, _onUpdate, _ctx) {
+          // Use AbortSignal from pi tool execution context for cancellation support
           const result = await mcpCall("tools/call", {
             name: tool.name,
             arguments: toolParams || {},
-          });
+          }, signal);
 
-          if (result.error) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Sketch MCP Error [${tool.name}]: ${result.error.message}${
-                    result.error.data ? `\nData: ${JSON.stringify(result.error.data)}` : ""
-                  }`,
-                },
-              ],
-              details: {
-                tool: tool.name,
-                error: result.error,
-              },
-            };
+          const { text, images, details } = extractContent(
+            result.result as Record<string, unknown> | undefined,
+          );
+
+          // Build content array: text + any image blocks
+          const content: Array<
+            { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
+          > = [];
+
+          if (text) {
+            content.push({ type: "text" as const, text });
+          }
+          for (const img of images) {
+            content.push(img);
           }
 
-          const { text, details } = extractContent(result.result as Record<string, unknown> | undefined);
-
           return {
-            content: [{ type: "text" as const, text }],
+            content,
             details: {
               tool: tool.name,
               ...details,
@@ -317,10 +405,14 @@ async function discoverAndRegisterTools(pi: ExtensionAPI): Promise<number> {
       registeredToolNames.add(toolName);
       registered++;
     } catch (err) {
-      console.error(`Sketch MCP: Failed to register tool "${tool.name}":`, err);
+      console.error(
+        `Sketch MCP: Failed to register tool "${tool.name}":`,
+        err instanceof Error ? err.message : err,
+      );
     }
   }
 
+  console.log(`Sketch MCP: registered ${registered} tools`);
   return registered;
 }
 
@@ -339,12 +431,26 @@ export default async function sketchMcpExtension(pi: ExtensionAPI) {
     } catch (err) {
       mcpConnected = false;
       const message = err instanceof Error ? err.message : String(err);
-      // Don't spam the user if Sketch isn't running; log quietly
       console.error(`Sketch MCP: ${message}`);
+      // Only show warning in TUI mode to avoid noise in print/RPC modes
       ctx.ui.notify(
-        `Sketch MCP unavailable (${message.slice(0, 80)})`,
+        `Sketch MCP unavailable — ${message.slice(0, 80)}`,
         "warning",
       );
+    }
+  });
+
+  // ── Session shutdown: clean up MCP session ───────────────────────
+  pi.on("session_shutdown", async (_event) => {
+    if (mcpConnected) {
+      try {
+        // Attempt graceful shutdown notification (fire-and-forget)
+        await mcpCall("shutdown", {}, AbortSignal.timeout(2000));
+        console.log("Sketch MCP: session shutdown complete");
+      } catch {
+        // Server may already be gone; silence the error
+      }
+      mcpConnected = false;
     }
   });
 
@@ -354,6 +460,11 @@ export default async function sketchMcpExtension(pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       mcpConnected = false;
       requestId = 0;
+
+      // Note: Pi does not currently support unregistering tools.
+      // Clearing the set ensures we re-register under the same names,
+      // which will overwrite the previous registrations.
+      const previousCount = registeredToolNames.size;
       registeredToolNames = new Set();
 
       ctx.ui.notify("Reconnecting to Sketch MCP server...", "info");
@@ -362,13 +473,13 @@ export default async function sketchMcpExtension(pi: ExtensionAPI) {
         const count = await discoverAndRegisterTools(pi);
         mcpConnected = true;
         ctx.ui.notify(
-          `Sketch MCP reconnected – ${count} tools available`,
+          `Sketch MCP reconnected – ${count} tools available (was ${previousCount})`,
           "info",
         );
       } catch (err) {
         mcpConnected = false;
         const message = err instanceof Error ? err.message : String(err);
-        ctx.ui.notify(`Sketch MCP failed: ${message}`, "error");
+        ctx.ui.notify(`Sketch MCP reconnection failed: ${message}`, "error");
       }
     },
   });
@@ -384,7 +495,9 @@ export default async function sketchMcpExtension(pi: ExtensionAPI) {
         );
       } else {
         ctx.ui.notify(
-          `Sketch MCP: not connected. Start MCP Server in Sketch (⌘K → "Start MCP Server"), then run /sketch-reconnect`,
+          `Sketch MCP: not connected.\n\n` +
+            `Server URL: ${DEFAULT_MCP_URL}\n` +
+            `To connect: Start Sketch, then press ⌘K → "Start MCP Server", then run /sketch-reconnect`,
           "warning",
         );
       }

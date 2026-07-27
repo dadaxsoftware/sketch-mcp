@@ -2,7 +2,7 @@
 
 Bridge extension that connects [Pi](https://github.com/earendil-works/pi) — a lightweight AI coding agent harness — to the [Sketch](https://www.sketch.com/) MCP Server, enabling AI-assisted design workflows directly from your terminal.
 
-When active, your Pi agent gains access to the full Sketch document model: it can read layer hierarchies, export assets, capture screenshots, execute SketchAPI scripts, and more — all through dynamically discovered MCP tools.
+When active, your Pi agent gains access to the full Sketch document model: it can read layer hierarchies, export assets, capture screenshots (including visual analysis by the LLM), execute SketchAPI scripts, and more — all through dynamically discovered MCP tools.
 
 ## Prerequisites
 
@@ -28,6 +28,14 @@ cp sketch-mcp.ts ~/.pi/agent/extensions/
 ### 3. Restart Pi
 
 The extension is auto-discovered from `~/.pi/agent/extensions/`. No additional configuration needed.
+
+### Configuration
+
+By default, the extension connects to `http://localhost:31126/mcp`. To use a custom port or host, set the `SKETCH_MCP_URL` environment variable:
+
+```bash
+export SKETCH_MCP_URL=http://localhost:1234/mcp
+```
 
 ## Available Tools
 
@@ -85,13 +93,23 @@ You can copy a layer's unique ID in Sketch via **Command Bar → Copy Layer ID**
 
 1. Extension starts on session_start
 2. Sends MCP "initialize" request
-3. Calls "tools/list" to discover available Sketch tools
-4. Converts JSON Schema → TypeBox for each tool's parameters
-5. Registers each tool as a native Pi tool (sketch_*)
-6. AI can call these tools; extension forwards via "tools/call"
+3. Sends "notifications/initialized" per MCP protocol §4.1
+4. Calls "tools/list" to discover available Sketch tools
+5. Converts JSON Schema → TypeBox for each tool's parameters
+6. Registers each tool as a native Pi tool (sketch_*)
+7. AI can call these tools; extension forwards via "tools/call"
+8. Image content (screenshots) is passed through to the LLM for visual analysis
 ```
 
 The extension transforms the MCP JSON-RPC protocol (HTTP transport) into Pi's native tool system, so the AI agent doesn't need to know about MCP — it just sees a set of Sketch-specific tools available for use.
+
+### Screenshot Support
+
+When the AI calls `sketch_get_screenshot`, the resulting image is passed directly to the LLM as a proper `ImageContent` block. This enables the AI to:
+- Visually analyze and describe designs
+- Verify layout alignment and spacing
+- Catch visual regressions
+- Compare design against reference screenshots
 
 ## Troubleshooting
 
@@ -100,7 +118,7 @@ The extension transforms the MCP JSON-RPC protocol (HTTP transport) into Pi's na
 1. Verify Sketch is running and the MCP server is started (`⌘K → "Start MCP Server"`)
 2. Check **System Settings → Privacy & Security → Local Network** — Sketch must be enabled
 3. Run `/sketch-reconnect` in Pi to retry the connection
-4. Run `/sketch-status` to check the current connection state
+4. Run `/sketch-status` to check the current connection state and server URL
 
 ### Port conflicts
 
@@ -110,7 +128,11 @@ If you need to change the MCP server port, quit Sketch and run:
 defaults write com.bohemiancoding.sketch3 mcpServerPortNumber -int 1234
 ```
 
-Then update the `DEFAULT_MCP_URL` constant in `sketch-mcp.ts` to match.
+Then configure the extension to use the new port:
+
+```bash
+export SKETCH_MCP_URL=http://localhost:1234/mcp
+```
 
 ### "Sketch 2025.2.4 or later required"
 
