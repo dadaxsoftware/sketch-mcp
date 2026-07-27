@@ -1,6 +1,6 @@
 # Sketch MCP Bridge for Pi
 
-Bridge extension that connects [Pi](https://github.com/earendil-works/pi-coding-agent) — a lightweight AI coding agent harness — to the [Sketch](https://www.sketch.com/) MCP Server, enabling AI-assisted design workflows directly from your terminal.
+Bridge extension that connects [Pi](https://github.com/earendil-works/pi) — a lightweight AI coding agent harness — to the [Sketch](https://www.sketch.com/) MCP Server, enabling AI-assisted design workflows directly from your terminal.
 
 When active, your Pi agent gains access to the full Sketch document model: it can read layer hierarchies, export assets, capture screenshots, execute SketchAPI scripts, and more — all through dynamically discovered MCP tools.
 
@@ -125,4 +125,4 @@ The MCP Server is not available in the Mac App Store version. Download the lates
 
 ## License
 
-[MIT](LICENSE) © Dadax Software Lab
+[MIT](https://github.com/dadaxsoftware/sketch-mcp/blob/main/LICENSE)
