@@ -1,0 +1,31 @@
+{
+  "name": "sketch-mcp",
+  "version": "1.0.0",
+  "description": "MCP bridge extension to provide Sketch design details to AI coding agents like Pi",
+  "keywords": [
+    "sketch",
+    "mcp",
+    "pi",
+    "ai",
+    "design",
+    "coding-agent",
+    "extension"
+  ],
+  "homepage": "https://github.com/dadaxsoftware/sketch-mcp",
+  "bugs": {
+    "url": "https://github.com/dadaxsoftware/sketch-mcp/issues"
+  },
+  "license": "MIT",
+  "author": "Dadax Software Lab <wang@dadax.cn>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dadaxsoftware/sketch-mcp.git"
+  },
+  "files": [
+    "sketch-mcp.ts"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
