@@ -1,8 +1,19 @@
 # Sketch MCP Bridge for Pi
 
-Bridge extension that connects [Pi](https://github.com/earendil-works/pi) — a lightweight AI coding agent harness — to the [Sketch](https://www.sketch.com/) MCP Server, enabling AI-assisted design workflows directly from your terminal.
+Bridge extension connecting [Pi](https://github.com/earendil-works/pi) — the AI coding agent harness — to the built-in [Sketch](https://www.sketch.com/) MCP Server, enabling AI-assisted design workflows from your terminal.
 
-When active, your Pi agent gains access to the full Sketch document model: it can read layer hierarchies, export assets, capture screenshots (including visual analysis by the LLM), execute SketchAPI scripts, and more — all through dynamically discovered MCP tools.
+**v2.0** introduces guide-aware prompting, smart `run_code` pre-flight checks, connection health monitoring, and enriched tool descriptions — all built on a modular multi-file architecture.
+
+## What's New in v2.0
+
+| Feature | Description |
+|---|---|
+| **Guide-Aware Prompting** | Auto-injects Sketch MCP best practices into the system prompt via `before_agent_start`. AI knows to load guides before making tool calls. |
+| **Smart run_code** | Enriched tool descriptions remind AI about `require('sketch')`, no-comments rule, and `console.log` result reporting. Auto-suggests loading `troubleshooting` guide on failure. |
+| **Guide Preloading** | `mcp` and `troubleshooting` guides are preloaded on session start and cached (30min TTL). |
+| **Enriched Tool Meta** | Each tool gets a detailed description with parameter hints, known value sets (e.g., `kind: symbol|textStyle|layerStyle|swatch|frameTemplate|graphicTemplate`), and prerequisite guides. |
+| **New Commands** | `/sketch-guide [topic]` — fetch any guide on demand. `/sketch-tools` — list all registered Sketch tools. |
+| **Modular Architecture** | `src/mcp-client.ts`, `src/schema.ts`, `src/guides.ts`, `src/index.ts` — clean separation of concerns. |
 
 ## Prerequisites
 
@@ -12,56 +23,94 @@ When active, your Pi agent gains access to the full Sketch document model: it ca
 
 ## Installation
 
-### 1. Clone the repository
+### As a Pi Extension (auto-discovery)
 
 ```bash
+# Clone to global extensions directory
 git clone https://github.com/dadaxsoftware/sketch-mcp.git ~/.pi/agent/extensions/sketch-mcp
 ```
 
-### 2. Or copy the extension file directly
+Or copy the `src/` directory and `package.json` to any extension location:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-cp sketch-mcp.ts ~/.pi/agent/extensions/
+mkdir -p ~/.pi/agent/extensions/sketch-mcp
+cp -r src/ package.json ~/.pi/agent/extensions/sketch-mcp/
 ```
 
-### 3. Restart Pi
+### Quick Test (no install)
 
-The extension is auto-discovered from `~/.pi/agent/extensions/`. No additional configuration needed.
+```bash
+pi -e ./src/index.ts
+```
 
 ### Configuration
 
-By default, the extension connects to `http://localhost:31126/mcp`. To use a custom port or host, set the `SKETCH_MCP_URL` environment variable:
+By default, the extension connects to `http://localhost:31126/mcp`. Override via environment variable:
 
 ```bash
 export SKETCH_MCP_URL=http://localhost:1234/mcp
 ```
 
+## Architecture
+
+```
+┌──────────────────┐                         ┌───────────────────────┐
+│                  │  HTTP JSON-RPC           │                       │
+│  Pi Agent        │◄────────────────────────►│  Sketch MCP Server    │
+│  + Extensions    │  (localhost:31126)       │  (built into Sketch)  │
+│                  │                         │                       │
+└──────────────────┘                         └───────────────────────┘
+        │
+        │ pi hooks
+        ▼
+┌──────────────────────────────────────────────────────────────┐
+│  sketch-mcp extension (src/)                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐  │
+│  │ mcp-client.ts│  │  schema.ts   │  │   guides.ts        │  │
+│  │ JSON-RPC     │  │ JSON Schema  │  │ Guide preloading   │  │
+│  │ transport    │  │ → TypeBox    │  │ System prompt      │  │
+│  │ content ext. │  │ + enrichment │  │ snippet builder    │  │
+│  └──────────────┘  └──────────────┘  └────────────────────┘  │
+│                          │                                    │
+│                   index.ts (entry)                            │
+│                   Tool registration + Lifecycle hooks         │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### How It Works
+
+1. **session_start** — Initializes MCP handshake, discovers tools via `tools/list`, registers each as a native pi tool (`sketch_*`), preloads essential guides.
+2. **before_agent_start** — Injects "Sketch MCP Best Practices" snippet into the system prompt, teaching the AI proper tool usage without repeated guide calls.
+3. **Tool calls** — Forwarded to `tools/call` on the MCP server. Image content (screenshots) is passed through so the LLM can visually analyze designs.
+4. **session_shutdown** — Graceful MCP session teardown.
+
 ## Available Tools
 
-On session start, the extension discovers and registers all tools exposed by the Sketch MCP Server. Each tool is prefixed with `sketch_`:
+All tools are prefixed with `sketch_`. They are auto-discovered from the MCP server on connect.
 
-| Pi Tool | Description |
+| Tool | Description |
 |---|---|
-| `sketch_get_document_info` | Structured overview of the open document: ID, filename, pages, layer counts, top-level frame names and dimensions |
-| `sketch_get_layer_tree_summary` | Readable text hierarchy of layers — types, IDs, positions, dimensions, stack layouts, text content, override counts |
-| `sketch_get_design_assets` | Design assets from the current document: symbols, text styles, layer styles, color swatches, frame templates, graphic templates |
-| `sketch_get_screenshot` | Screenshot of a specific layer or the current canvas state |
-| `sketch_get_libraries` | Information about libraries linked to the current document |
-| `sketch_get_symbol_overrides` | Override properties for a given symbol instance — what can be customized without detaching |
-| `sketch_get_guide` | Sketch's built-in reference guides on specific topics |
-| `sketch_run_code` | Execute arbitrary JavaScript via the [SketchAPI](https://developer.sketch.com/reference/api/) — full plugin-level control |
+| `sketch_get_guide` | **PREREQUISITE** — Load MCP usage guides. Topics: `mcp`, `troubleshooting`, `use`, `layout`, `styling`, `symbols`, `assets`, `prototyping` |
+| `sketch_get_document_info` | Document overview: filename, pages, layer counts, top-level frames |
+| `sketch_get_layer_tree_summary` | Layer hierarchy with types, IDs, positions, dimensions, text, stack layouts |
+| `sketch_get_design_assets` | Design assets: symbols, text styles, layer styles, swatches, templates |
+| `sketch_get_screenshot` | PNG screenshot of a layer or selection (AI can see the image) |
+| `sketch_get_libraries` | Linked library information |
+| `sketch_get_symbol_overrides` | Editable override properties on a symbol instance |
+| `sketch_run_code` | Execute SketchAPI JavaScript — full plugin-level control |
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `/sketch-status` | Show whether the Sketch MCP server is connected and how many tools are registered |
-| `/sketch-reconnect` | Force a reconnection and re-discover all tools from the MCP server |
+| `/sketch-status` | Show connection state and server URL |
+| `/sketch-reconnect` | Force reconnection and tool re-discovery |
+| `/sketch-guide [topic]` | Fetch a guide topic (mcp, troubleshooting, use, layout, styling, symbols, assets, prototyping) |
+| `/sketch-tools` | List all registered Sketch MCP tools |
 
 ## Usage Examples
 
-Once connected, you can prompt your Pi agent with natural language:
+Once connected, prompt your Pi agent naturally:
 
 ```
 > Export all "icon/" symbols from the current Sketch page as SVG to my Desktop
@@ -70,7 +119,7 @@ Once connected, you can prompt your Pi agent with natural language:
 
 > Get the complete layer tree of the current document
 
-> Create a vertical stack of four rectangles and apply unique gradients to each
+> Create a vertical stack of four rectangles with unique gradients each
 
 > Fix grammar and spelling mistakes on all text layers in the selected frame
 
@@ -79,70 +128,35 @@ Once connected, you can prompt your Pi agent with natural language:
 
 ### Referring to Specific Layers
 
-You can copy a layer's unique ID in Sketch via **Command Bar → Copy Layer ID** (or use the context menu when the MCP server is running), then paste it into your prompt.
-
-## How It Works
-
-```
-┌──────────────┐     HTTP JSON-RPC     ┌───────────────────┐
-│              │◄──────────────────────►│                   │
-│  Pi Agent    │     (localhost:31126)  │  Sketch MCP       │
-│  + Extension │                        │  Server (built-in)│
-│              │                        │                   │
-└──────────────┘                        └───────────────────┘
-
-1. Extension starts on session_start
-2. Sends MCP "initialize" request
-3. Sends "notifications/initialized" per MCP protocol §4.1
-4. Calls "tools/list" to discover available Sketch tools
-5. Converts JSON Schema → TypeBox for each tool's parameters
-6. Registers each tool as a native Pi tool (sketch_*)
-7. AI can call these tools; extension forwards via "tools/call"
-8. Image content (screenshots) is passed through to the LLM for visual analysis
-```
-
-The extension transforms the MCP JSON-RPC protocol (HTTP transport) into Pi's native tool system, so the AI agent doesn't need to know about MCP — it just sees a set of Sketch-specific tools available for use.
-
-### Screenshot Support
-
-When the AI calls `sketch_get_screenshot`, the resulting image is passed directly to the LLM as a proper `ImageContent` block. This enables the AI to:
-- Visually analyze and describe designs
-- Verify layout alignment and spacing
-- Catch visual regressions
-- Compare design against reference screenshots
+In Sketch, open the **Command Bar (`⌘K`) → Copy Layer ID** (or use the context menu when MCP server is running), then paste the ID into your prompt.
 
 ## Troubleshooting
 
 ### Extension can't connect
 
-1. Verify Sketch is running and the MCP server is started (`⌘K → "Start MCP Server"`)
-2. Check **System Settings → Privacy & Security → Local Network** — Sketch must be enabled
-3. Run `/sketch-reconnect` in Pi to retry the connection
-4. Run `/sketch-status` to check the current connection state and server URL
+1. Verify Sketch is running and MCP server is started (`⌘K → "Start MCP Server"`)
+2. Check **System Settings → Privacy & Security → Local Network** — Sketch must be allowed
+3. Run `/sketch-reconnect` in Pi to retry
+4. Run `/sketch-status` to check the current state
 
 ### Port conflicts
 
-If you need to change the MCP server port, quit Sketch and run:
+Change the MCP server port:
 
 ```bash
 defaults write com.bohemiancoding.sketch3 mcpServerPortNumber -int 1234
-```
-
-Then configure the extension to use the new port:
-
-```bash
 export SKETCH_MCP_URL=http://localhost:1234/mcp
 ```
 
 ### "Sketch 2025.2.4 or later required"
 
-The MCP Server is not available in the Mac App Store version. Download the latest version from [sketch.com](https://www.sketch.com/releases/mac/).
+The MCP Server is not available in the Mac App Store version. Download from [sketch.com](https://www.sketch.com/releases/mac/).
 
 ## Security
 
-- The Sketch MCP server is **local-only** (127.0.0.1); it cannot be accessed remotely
+- The Sketch MCP server is **local-only** (127.0.0.1); no remote access
 - The server is **off by default** in Sketch
-- This extension only connects to localhost and makes no outbound requests
+- This extension only connects to localhost; no outbound requests
 - No data leaves your machine
 
 ## License
