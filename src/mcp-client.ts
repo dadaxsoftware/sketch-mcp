@@ -156,9 +156,10 @@ export async function mcpInitialize(): Promise<{ serverInfo: unknown }> {
     },
   });
 
-  // Fire-and-forget the required "initialized" notification per MCP spec §4.1
-  mcpCall("notifications/initialized", {}).catch((err) => {
-    console.warn(`Sketch MCP: initialized notification failed: ${err instanceof Error ? err.message : err}`);
+  // Fire-and-forget the required "initialized" notification per MCP spec §4.1.
+  // Sketch MCP over HTTP does not support POST for server→client notifications
+  // (it uses SSE), so 501 is expected and benign. Silently ignore.
+  mcpCall("notifications/initialized", {}).catch(() => {
   });
 
   return {
